@@ -1,134 +1,145 @@
 # Paper Report Agent
 
-这是一个面向单篇科研论文 PDF 的智能体流水线骨架。它的目标不是生成泛泛摘要，而是把论文解析成一份结构化、可追溯、技术细节充分的中文阅读报告。
+`Paper Report Agent` 是一个面向单篇科研论文 PDF 的 7-stage 阅读与写作工作流。  
+它的目标不是产出泛泛摘要，而是把一篇论文拆成可核查的中间证据，再生成一份结构化、技术细节充分、默认使用中文撰写的阅读报告。
 
-## 仓库审查结论
+## 这个仓库解决什么问题
 
-从当前仓库结构看，这个智能体的 pipeline 主要做的是：
+读论文时，最常见的失败模式不是“没看摘要”，而是：
 
-1. 读取一篇输入论文 PDF。
-2. 先做结构化解析，识别标题、作者、章节、图表编号。
-3. 分阶段抽取论文事实，包括动机、问题设定、贡献、核心技术、实验结果、局限性和未来工作。
-4. 基于模板写成一份 Markdown 报告。
-5. 再做一轮自审，检查是否忠于原文、是否有幻觉、技术细节是否足够具体。
+- 方法部分讲不清完整 pipeline，只会复述 abstract
+- 实验部分堆很多表，却没有说清楚哪些结果真正支持了作者的主张
+- 报告里混入编造的图表编号、数值或过度推断
+- 最终成文可读性差，像把原文句子和标签硬拼起来
 
-换句话说，这不是一个“文献综述 agent”，也不是“自动跑实验的 agent”，而是一个单篇论文阅读与报告生成 agent。
+这个仓库用一个显式的 7-stage pipeline 来约束智能体：
 
-## 这个 pipeline 的核心特点
+1. 先建立论文结构索引和证据地图。
+2. 再分阶段抽取事实、方法、实验和局限性。
+3. 最后统一写成报告，并做一次 review/revise。
 
-- 以“忠于原文、避免编造”为第一原则。
-- 明确区分“作者原文表述”“实验支持”“谨慎解读”。
-- 强调机制级技术解释，而不是只复述摘要。
-- 要求把关键实验结果整理成可编辑的 Markdown 表格。
-- 不重绘图片，而是推荐原文中的 Figure / Table 编号。
-- 在最终写作后加入一次 review-and-revise 复审阶段。
+这使它更像一个“论文阅读工作流”，而不是一个单轮问答 prompt。
 
-## 流水线分解
+## 设计原则
 
-### Stage 1: Parse and Index
+- 忠于原文优先，缺失就明确写“不确定”
+- 方法解释优先，尤其强调 system / model pipeline、训练、推理和部署链路
+- 实验是证据，不是全文主体
+- 关键定量结果转成可编辑 Markdown 表格
+- 重要专有名词和缩写在首次出现时解释清楚
+- 最终报告应当是自然中文，不要被机械的“作者明确表述”前缀破坏可读性
 
-文件：`prompts/01_parse_and_index.md`
+## 7-Stage 工作流
 
-目标：
-- 识别论文基本元数据
+| Stage | Key | 主要目标 | 主要输出 |
+|---|---|---|---|
+| 1 | `parse` | 解析 PDF 结构，建立章节、图表和证据索引 | `workspace/intermediate/parsed_notes.md` |
+| 2 | `claims` | 抽取动机、问题设定、贡献等核心事实 | `workspace/intermediate/extraction.json` |
+| 3 | `method` | 深挖主要技术，重建端到端 pipeline，解释关键术语 | `workspace/intermediate/method_notes.md` + `workspace/intermediate/extraction.json` |
+| 4 | `experiments` | 抽取数据集、指标、主结果、消融和关键表格 | `workspace/intermediate/experiment_notes.md` + `workspace/intermediate/extraction.json` |
+| 5 | `compare` | 补全比较、局限性与未来工作 | `workspace/intermediate/extraction.json` |
+| 6 | `report` | 基于模板和结构化抽取生成完整报告 | `workspace/output/final_report.md` |
+| 7 | `review` | 审查幻觉、越界推断、图表引用和表达质量，再直接修订报告 | `workspace/intermediate/review_notes.md` + `workspace/output/final_report.md` |
+
+### Stage 1: `parse`
+
+读取 `prompts/01_parse_and_index.md`，目标是：
+
+- 识别论文题目、作者、版本或 venue/year
 - 重建章节结构
-- 列出可见的图表及其原始编号
-- 判断哪些章节对应动机、方法、实验、相关工作、局限性
+- 列出图表及其原始编号
+- 标出动机、方法、实验、相关工作、局限性可能位于哪些章节
 
-建议输出：
-- `workspace/intermediate/parsed_notes.md`
+这一阶段不追求成文质量，重点是给后续阶段提供“证据索引”。
 
-这一阶段本质上是在给后续步骤建立“索引”和“证据地图”。
+### Stage 2: `claims`
 
-### Stage 2: Extract Core Claims
+读取 `prompts/02_extract_core_claims.md`，把论文的核心事实回填到 `workspace/intermediate/extraction.json`：
 
-文件：`prompts/02_extract_core_claims.md`
+- `basic_info`
+- `motivation`
+- `problem_setting`
+- `contributions`
 
-目标：
-- 抽取动机
-- 抽取问题设定
-- 抽取主要贡献
+这一阶段仍然偏事实抽取，不提前写成漂亮 prose。
 
-建议输出：
-- `workspace/intermediate/extraction.json` 中的
-  - `basic_info`
-  - `motivation`
-  - `problem_setting`
-  - `contributions`
+### Stage 3: `method`
 
-这一阶段强调只保留有论文依据的事实，不提前润色。
+读取 `prompts/03_extract_main_technology.md`。这是整条 pipeline 中最重要的一步。
 
-### Stage 3: Extract Main Technology
+要求不仅是“讲方法”，而是：
 
-文件：`prompts/03_extract_main_technology.md`
+- 说清输入 / 输出
+- 把完整 pipeline 按步骤拆开
+- 解释核心模块的输入、输出、作用和连接关系
+- 说明训练目标、推理流程和部署闭环
+- 解释关键专有名词
+- 判断真正的新意和最可能的性能来源
 
-目标：
-- 解释完整系统或模型 pipeline
-- 拆解核心模块
-- 说明训练目标、优化过程、推理流程
-- 判断真正的新意和性能提升来源
-- 解释关键专有名词，并把端到端链路按步骤拆开
+输出会写入：
 
-建议输出：
 - `workspace/intermediate/method_notes.md`
-- 同时回填 `workspace/intermediate/extraction.json` 中的 `main_technology`
+- `workspace/intermediate/extraction.json` 的 `main_technology` 段
 
-这是整条流水线里最重要的一步，仓库中的 `AGENT.md` 和 `configs/style_guide.md` 都要求这一部分必须讲清输入、输出、模块关系、训练和推理。
+### Stage 4: `experiments`
 
-### Stage 4: Extract Experiments
+读取 `prompts/04_extract_experiments.md`，重点抽：
 
-文件：`prompts/04_extract_experiments.md`
+- 数据集 / benchmark
+- 指标
+- 主结果
+- 消融
+- 泛化或定性结果
+- 效率 / 部署证据（如果论文有）
 
-目标：
-- 提取数据集、benchmark、指标
-- 抽取主结果、消融、定性结果
-- 把关键数值结果转成 Markdown 表格
+关键数值会转成 Markdown 表格，便于后续直接引用。
 
-建议输出：
-- `workspace/intermediate/experiment_notes.md`
-- 同时回填 `workspace/intermediate/extraction.json` 中的 `experiments`、`tables`、`figures`
+### Stage 5: `compare`
 
-### Stage 5: Compare and Limitations
+读取 `prompts/05_compare_and_limitations.md`，补全：
 
-文件：`prompts/05_compare_and_limitations.md`
+- `comparison`
+- `limitations`
+- `future_work`
 
-目标：
-- 基于论文自身的 related work 和实验对比做谨慎比较
-- 提取作者明确写出的局限性
-- 补充有证据支撑的审慎推断
-- 整理未来工作方向
+这里强调的是“谨慎比较”。  
+默认只在论文自身 `related work` 和实验比较提供足够证据时才做结论，不把它扩展成完整文献综述。
 
-建议输出：
-- 回填 `workspace/intermediate/extraction.json` 中的
-  - `comparison`
-  - `limitations`
-  - `future_work`
+### Stage 6: `report`
 
-### Stage 6: Write Report
+读取：
 
-文件：`prompts/06_write_report.md`
-
-依赖：
+- `prompts/06_write_report.md`
 - `templates/report_template.md`
 - `templates/extraction_template.json`
 - `configs/report_schema.md`
 - `configs/style_guide.md`
 
-目标：
-- 按固定结构写出完整中文论文阅读报告
+把前面各阶段积累的结构化信息统一写成：
 
-输出：
 - `workspace/output/final_report.md`
 
-### Stage 7: Review and Revise
+这一阶段会显式重写中间抽取结果，尽量避免把中间标签机械搬运到最终报告里。
 
-文件：`prompts/07_review_and_revise.md`
+### Stage 7: `review`
 
-目标：
-- 检查幻觉、过度推断、图表编号错误、技术解释不充分等问题
-- 根据检查结果修订最终报告
+读取：
 
-建议输出：
+- `prompts/07_review_and_revise.md`
+- `configs/quality_checklist.md`
+- `configs/quality_rubric.md`
+
+对最终报告做一轮 critic / self-revise，重点检查：
+
+- 是否忠于论文
+- 方法解释是否具体
+- 实验证据是否真的出现
+- 图表编号是否可靠
+- 是否有幻觉或越界推断
+- 局限性是否区分作者声明与谨慎推断
+
+输出：
+
 - `workspace/intermediate/review_notes.md`
 - 修订后的 `workspace/output/final_report.md`
 
@@ -136,50 +147,52 @@
 
 ```text
 .
-├── AGENT.md                          # 智能体总规则：目标、语言、写作原则、技术深度要求
-├── prompts/                         # 分阶段提示词
-├── scripts/
-│   └── run_pipeline.py              # 适配 codex exec 的最小 orchestrator
-├── templates/
-│   ├── report_template.md           # 最终报告模板
-│   └── extraction_template.json     # 结构化抽取模板
+├── AGENT.md
 ├── configs/
-│   ├── report_schema.md             # 报告结构约束
-│   ├── style_guide.md               # 中文写作与技术表达规范
-│   ├── quality_checklist.md         # 质检检查项
-│   └── quality_rubric.md            # 打分 rubric
+│   ├── quality_checklist.md
+│   ├── quality_rubric.md
+│   ├── report_schema.md
+│   └── style_guide.md
+├── prompts/
+│   ├── 01_parse_and_index.md
+│   ├── 02_extract_core_claims.md
+│   ├── 03_extract_main_technology.md
+│   ├── 04_extract_experiments.md
+│   ├── 05_compare_and_limitations.md
+│   ├── 06_write_report.md
+│   └── 07_review_and_revise.md
+├── scripts/
+│   └── run_pipeline.py
+├── templates/
+│   ├── extraction_template.json
+│   └── report_template.md
 └── workspace/
-    ├── input/                       # 输入 PDF
-    ├── intermediate/                # 中间产物
-    └── output/                      # 最终报告
+    ├── input/
+    ├── intermediate/
+    ├── logs/
+    └── output/
 ```
 
-## 推荐使用方式
+各目录职责可以这样理解：
 
-当前仓库已经提供了一个适配 `codex exec` 的最小 orchestrator：
+- `AGENT.md`: 全局规则，定义智能体目标、语言和技术深度要求
+- `prompts/`: 每个 stage 的局部任务说明
+- `configs/`: 对最终报告的结构、风格和质检要求
+- `templates/`: 最终报告和结构化抽取的骨架
+- `scripts/run_pipeline.py`: 7-stage orchestrator
+- `workspace/`: 本地运行目录，不是长期版本化内容
 
-- `scripts/run_pipeline.py`
+## 推荐运行方式
 
-它会按顺序调用 7 个阶段，自动初始化 `workspace/intermediate/extraction.json`，并把每个阶段的提示词、CLI 输出和最后一条 agent 回复保存到 `workspace/logs/run-时间戳/`。
+### 1. 准备输入论文
 
-新版工作流还会：
+把待分析论文放到：
 
-- 在最终报告中避免机械重复的“作者明确表述 / 实验支持”前缀，默认改为自然中文叙述
-- 只对“谨慎推断”和“不确定性说明”做显式标记
-- 强化 `Main Technology` 章节，使其通常成为全文最详细的部分
-- 在完整 run 结束后统计各阶段以及总计的 token 使用量
+- `workspace/input/<paper>.pdf`
 
-### 方式 A：用 orchestrator 自动执行，推荐
+建议一次只放一篇，避免 agent 读错文件。
 
-这是目前最适合 `codex` 这类 CLI agent 的运行方式。
-
-#### 前置条件
-
-- 本机已安装 `codex` CLI
-- 已完成 `codex login`
-- 待分析 PDF 位于仓库内，推荐放在 `workspace/input/`
-
-#### 一次跑完整流程
+### 2. 直接运行完整 7-stage pipeline
 
 ```bash
 python3 scripts/run_pipeline.py \
@@ -187,170 +200,133 @@ python3 scripts/run_pipeline.py \
   --full-auto
 ```
 
-#### 只跑部分阶段
+### 3. 只跑部分阶段
 
-例如从抽取核心观点开始，跑到写报告为止：
+例如从 `claims` 跑到 `review`：
 
 ```bash
 python3 scripts/run_pipeline.py \
   --pdf workspace/input/Q-vla.pdf \
   --from-stage claims \
-  --to-stage report \
+  --to-stage review \
   --full-auto
 ```
 
-#### 常用参数
-
-- `--pdf`: 输入 PDF 路径
-- `--from-stage` / `--to-stage`: 控制起止阶段，可选值为 `parse`、`claims`、`method`、`experiments`、`compare`、`report`、`review`
-- `--model`: 传给 `codex exec` 的模型名
-- `--profile`: 传给 `codex exec` 的 profile
-- `--sandbox`: sandbox 模式，默认 `workspace-write`
-- `--full-auto`: 让 `codex exec` 尽量自动执行
-- `--ephemeral`: 不保留 Codex session 文件
-- `--force-init-extraction`: 强制用模板覆盖初始化 `workspace/intermediate/extraction.json`
-- `--dry-run`: 只生成本次运行的 prompt 和 manifest，不实际调用 Codex
-
-#### 自动运行后的产物
-
-- 中间结果仍写入 `workspace/intermediate/`
-- 最终报告写入 `workspace/output/final_report.md`
-- 每次运行的日志写入 `workspace/logs/run-YYYYMMDD-HHMMSS/`
-
-日志目录中会包含：
-
-- `manifest.json`: 本次运行参数
-- `token_usage.json`: 各阶段与整条 pipeline 的 token 汇总
-- `01_parse.prompt.txt` 这类阶段 prompt
-- `01_parse.stdout.log` 这类 Codex CLI 输出
-- `01_parse.last_message.txt` 这类阶段收尾回复
-
-### 方式 B：分阶段手工执行
-
-这是最稳妥的人工控制方式，适合你想逐阶段盯质量的时候。
-
-#### 1. 准备输入
-
-- 把待分析论文放到 `workspace/input/`
-- 建议只保留当前要分析的一篇论文，避免 agent 选错文件
-- 例如可替换现有的 `workspace/input/Q-vla.pdf`
-
-#### 2. 初始化结构化抽取文件
-
-将模板复制为运行态文件：
+### 4. 只生成本次 prompt，不真正调用 Codex
 
 ```bash
-cp templates/extraction_template.json workspace/intermediate/extraction.json
+python3 scripts/run_pipeline.py \
+  --pdf workspace/input/Q-vla.pdf \
+  --dry-run
 ```
 
-#### 3. 按顺序执行 7 个阶段
+## `run_pipeline.py` 做了什么
 
-可直接对智能体下达类似指令：
+这个脚本不是“大而全”的 workflow engine，而是一个最小可用 orchestrator。它会：
 
-```text
-请先阅读 AGENT.md，然后读取 prompts/01_parse_and_index.md，
-以 workspace/input/<论文文件名>.pdf 为输入，
-将解析结果写入 workspace/intermediate/parsed_notes.md。
-```
+1. 检查仓库布局和输入 PDF。
+2. 根据 `--from-stage` / `--to-stage` 选择阶段区间。
+3. 在需要时自动初始化 `workspace/intermediate/extraction.json`。
+4. 为每个 stage 单独构造 prompt，并启动一次 `codex exec`。
+5. 验证阶段输出是否存在、是否为空、JSON 是否合法。
+6. 记录 manifest、stage prompt、stdout log 和最后一条 agent 回复。
+7. 从每个 stage 的 stdout log 里解析 `tokens used`，汇总整条 pipeline 的 token 使用量。
 
-```text
-基于 workspace/intermediate/parsed_notes.md 和原论文，
-读取 prompts/02_extract_core_claims.md，
-把 basic_info、motivation、problem_setting、contributions
-填入 workspace/intermediate/extraction.json。
-```
+这意味着整条 pipeline 不是“一段长对话”，而是“7 次独立的 Codex 调用，通过文件状态接力”。
 
-```text
-读取 prompts/03_extract_main_technology.md，
-输出 workspace/intermediate/method_notes.md，
-并同步更新 workspace/intermediate/extraction.json 的 main_technology 字段。
-```
+## 常用参数
 
-```text
-读取 prompts/04_extract_experiments.md，
-输出 workspace/intermediate/experiment_notes.md，
-并同步更新 workspace/intermediate/extraction.json 的 experiments、tables、figures 字段。
-```
+| 参数 | 作用 |
+|---|---|
+| `--pdf` | 输入 PDF 路径 |
+| `--from-stage` / `--to-stage` | 指定起止阶段 |
+| `--model` | 透传给 `codex exec` 的模型名 |
+| `--profile` | 透传给 `codex exec` 的 profile |
+| `--sandbox` | Codex sandbox 模式，默认 `workspace-write` |
+| `--full-auto` | 让 `codex exec` 尽量自主执行 |
+| `--search` | 启用 Codex search |
+| `--ephemeral` | 不保留 Codex session 文件 |
+| `--force-init-extraction` | 强制用模板覆盖 `workspace/intermediate/extraction.json` |
+| `--dry-run` | 只生成运行提示和日志占位，不实际调用 Codex |
+| `--codex-arg` | 透传额外原始参数给 `codex exec` |
 
-```text
-读取 prompts/05_compare_and_limitations.md，
-补全 workspace/intermediate/extraction.json 中的 comparison、limitations、future_work。
-```
+## 运行产物
 
-```text
-读取 prompts/06_write_report.md、templates/report_template.md、
-configs/report_schema.md、configs/style_guide.md，
-基于 workspace/intermediate/extraction.json 和中间笔记，
-生成 workspace/output/final_report.md。
-```
+### 中间产物
 
-```text
-读取 prompts/07_review_and_revise.md、configs/quality_checklist.md、
-configs/quality_rubric.md，
-审查 workspace/output/final_report.md，
-把审查意见写入 workspace/intermediate/review_notes.md，
-并直接修订 workspace/output/final_report.md。
-```
+- `workspace/intermediate/parsed_notes.md`
+- `workspace/intermediate/extraction.json`
+- `workspace/intermediate/method_notes.md`
+- `workspace/intermediate/experiment_notes.md`
+- `workspace/intermediate/review_notes.md`
 
-### 方式 C：单条总指令执行
+### 最终产物
 
-如果你的 agent 支持长上下文，也可以一次性下达总任务，但稳定性通常不如分阶段执行。
+- `workspace/output/final_report.md`
 
-可用指令模板：
+### 每次运行的日志目录
 
-```text
-请阅读 AGENT.md，并严格按照 prompts/01 到 prompts/07 的顺序处理
-workspace/input/<论文文件名>.pdf。
-使用 templates/extraction_template.json 作为结构化抽取骨架，
-使用 templates/report_template.md 生成最终报告，
-使用 configs/report_schema.md、configs/style_guide.md、
-configs/quality_checklist.md、configs/quality_rubric.md 进行约束和复审。
+- `workspace/logs/run-YYYYMMDD-HHMMSS/`
 
-请把中间结果分别写入：
-- workspace/intermediate/parsed_notes.md
-- workspace/intermediate/extraction.json
-- workspace/intermediate/method_notes.md
-- workspace/intermediate/experiment_notes.md
-- workspace/intermediate/review_notes.md
+典型内容包括：
 
-请把最终结果写入：
-- workspace/output/final_report.md
-```
+- `manifest.json`: 本次运行的参数快照
+- `01_parse.prompt.txt`: 该阶段真正送给 Codex 的 prompt
+- `01_parse.stdout.log`: 该阶段的完整 CLI 输出
+- `01_parse.last_message.txt`: 阶段结束时 agent 的收尾回复
+- `token_usage.json`: 各阶段及总 token 统计
 
-## 建议的操作习惯
+## 最终报告应该长什么样
 
-- 优先使用“分阶段执行”，不要一开始就追求一条指令跑到底。
-- 每完成一个阶段就检查一次是否出现编造的图表编号、虚构数值、过度推断。
-- 方法部分要回到 PDF 原文反复核对，不要只看 abstract。
-- 实验部分优先保留主表、关键消融和效率结果，不要机械抄全表。
-- 最终报告里应尽量保留“Figure X / Table Y 为什么值得看”的说明。
+一份合格的 `final_report.md` 至少应满足：
 
-## 当前仓库的现状与注意事项
+- 顶层结构完整，覆盖基本信息、动机、问题设定、贡献、技术、实验、比较、局限性、未来工作、总结
+- `Main Technology / 主要技术` 是全文最详细的部分之一
+- 可以把方法的 pipeline 按步骤复述出来，而不是只复述 abstract
+- 关键术语、缩写和 paper-specific object 在首次出现时有简洁解释
+- 至少包含一个可编辑 Markdown 结果表
+- 引用原始 Figure / Table 编号，但不重绘图片
+- 区分事实、证据和谨慎推断
+- 明确写出不确定性，而不是编造缺失细节
 
-- 这是一个 prompt/config/template 驱动的流程定义仓库，目前已经补了一个最小可用的 `codex exec` 编排脚本，但还不是重型工作流系统。
-- 自动执行仍依赖外部智能体环境，也就是本机可用的 `codex` CLI、账号状态和模型权限。
-- `workspace/` 里的中间文件和最终文件目前大多为空，说明流程骨架已搭好，但运行结果还需要 agent 实际生成。
-- `workspace/intermediate/method_notes.md` 与 `workspace/intermediate/methods_notes.md` 存在命名重复，后续建议只保留一个标准文件名。
+## 建议的使用习惯
 
-## 最终产物应该长什么样
+- 优先按 stage 跑，不要一开始就追求“一条指令跑到底”
+- `method` 阶段完成后先人工抽查一遍，再决定是否继续
+- 对机器人、VLA、LLM 论文，优先看方法 pipeline 是否真正讲清
+- 实验部分优先保留主结果、关键消融和部署证据，不要机械抄全表
+- `review` 阶段不要省，它对减少幻觉和改善成文质量很有用
 
-一个合格的 `workspace/output/final_report.md` 应至少满足：
+## 什么适合进版本库，什么不适合
 
-- 有完整的 10 个顶层部分：Basic Information 到 Takeaway
-- 技术部分能讲清 pipeline、模块、训练、推理、真正创新点，并且通常是全文最详细的部分
-- 关键专有名词在首次出现时有简洁解释
-- 实验部分包含至少一个可编辑 Markdown 表格
-- 明确区分事实、证据和解释
-- 不应被“作者明确表述”这类重复前缀破坏可读性
-- 局限性区分“作者声明”和“审慎推断”
-- 不编造图表编号、不编造实验数值
+当前仓库默认只版本化“流程定义”本身：
 
-## 后续建议
+- 适合上传：`AGENT.md`、`prompts/`、`configs/`、`templates/`、`scripts/`、`README.md`
+- 不适合上传：输入 PDF、运行日志、中间产物、最终报告
 
-如果你准备把这个仓库从“流程骨架”推进到“可运行系统”，优先级最高的补强项是：
+因此 `.gitignore` 默认忽略：
 
-1. 给现有 orchestrator 增加更细的阶段级校验，例如检查最终报告的 10 个顶层章节是否齐全。
-2. 明确 `workspace/intermediate/extraction.json` 的字段更新策略，避免不同阶段相互覆盖。
-3. 统一中间文件命名，去掉重复文件名。
-4. 增加自动质检脚本，至少校验必填章节、表格存在性和空文件。
-5. 增加一个样例跑通结果，便于之后做回归检查。
+- `workspace/input/*`
+- `workspace/intermediate/*`
+- `workspace/output/*`
+- `workspace/logs/*`
+- Python `__pycache__` 和本地环境目录
+
+`workspace/` 目录里只保留空目录占位文件，方便新环境直接运行。
+
+## 当前版本的边界
+
+这是一个工程上可用、但仍然偏轻量的 workflow 定义仓库，而不是重型调度系统。它当前的边界包括：
+
+- 依赖外部 `codex` CLI 和登录状态
+- 没有更细粒度的自动质检脚本，只做了阶段级基本校验
+- 结构化抽取仍然以模板和 prompt 约束为主，没有更强的 schema validator
+- 对跨论文批处理、检索增强和多篇综述写作没有专门设计
+
+## 后续可以继续增强的方向
+
+- 给 `final_report.md` 增加更严格的结构检查
+- 增加对 `extraction.json` 更细的字段级校验
+- 统一历史命名，去掉 `method_notes.md` / `methods_notes.md` 这种重复痕迹
+- 增加样例 run 和回归测试数据
+- 在更强模型下重新评估阶段拆分粒度，减少不必要的信息搬运
