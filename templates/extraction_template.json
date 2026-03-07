@@ -1,0 +1,81 @@
+{
+  "basic_info": {
+    "title": "",
+    "authors": [],
+    "venue": "",
+    "year": "",
+    "keywords": []
+  },
+  "motivation": {
+    "problem": [],
+    "importance": [],
+    "prior_limitations": []
+  },
+  "problem_setting": {
+    "task_definition": "",
+    "inputs": "",
+    "outputs": "",
+    "assumptions": [],
+    "evaluation_setup": ""
+  },
+  "contributions": [],
+  "main_technology": {
+    "overall_pipeline": "",
+    "pipeline_steps": [
+      {
+        "step": "",
+        "input": "",
+        "operation": "",
+        "output": "",
+        "why_it_matters": ""
+      }
+    ],
+    "core_modules": [
+      {
+        "name": "",
+        "function": "",
+        "why_it_matters": ""
+      }
+    ],
+    "key_terms": [
+      {
+        "term": "",
+        "explanation": "",
+        "why_it_matters": ""
+      }
+    ],
+    "training_objective": "",
+    "inference_process": "",
+    "novelty": [],
+    "performance_gain_hypothesis": []
+  },
+  "experiments": {
+    "datasets": [],
+    "benchmarks": [],
+    "metrics": [],
+    "main_results": [],
+    "ablation_findings": [],
+    "qualitative_findings": []
+  },
+  "figures": [
+    {
+      "id": "",
+      "caption": "",
+      "usage": ""
+    }
+  ],
+  "tables": [
+    {
+      "id": "",
+      "caption": "",
+      "markdown_table": ""
+    }
+  ],
+  "comparison": [],
+  "limitations": {
+    "author_stated": [],
+    "cautious_inference": []
+  },
+  "future_work": [],
+  "quotes": []
+}
