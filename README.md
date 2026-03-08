@@ -1,147 +1,115 @@
 # Paper Report Agent
 
-`Paper Report Agent` 是一个面向单篇科研论文 PDF 的 7-stage 阅读与写作工作流。  
-它的目标不是产出泛泛摘要，而是把一篇论文拆成可核查的中间证据，再生成一份结构化、技术细节充分、默认使用中文撰写的阅读报告。
+`Paper Report Agent` 是一个面向单篇科研论文 PDF 的阅读与写作工作流仓库。
 
-## 这个仓库解决什么问题
+当前默认工作流是面向高上下文模型优化过的 `compact` 模式：不再把理解过程拆成过多独立阶段，而是先做一次完整分析，再写报告，最后审校修订。原始 7-stage 方案仍然保留为 `legacy`，用于对比或兼容旧习惯。
 
-读论文时，最常见的失败模式不是“没看摘要”，而是：
+## 为什么默认改成 `compact`
 
-- 方法部分讲不清完整 pipeline，只会复述 abstract
-- 实验部分堆很多表，却没有说清楚哪些结果真正支持了作者的主张
-- 报告里混入编造的图表编号、数值或过度推断
-- 最终成文可读性差，像把原文句子和标签硬拼起来
+这个仓库最初把论文阅读拆成 `parse -> claims -> method -> experiments -> compare -> report -> review` 七次独立调用。这个思路对弱模型有帮助，但对像 Codex CLI 这种本身上下文能力较强的模型，常见副作用是：
 
-这个仓库用一个显式的 7-stage pipeline 来约束智能体：
+- 每个阶段都在重复读论文和重复压缩信息
+- 方法、实验、比较被拆散后，跨章节推理容易在阶段边界丢失
+- 最终 `report` 阶段更像“改写中间摘要”，而不是“基于论文证据直接成文”
+- 中间 JSON 和 notes 的写法会反过来污染最终报告表达
 
-1. 先建立论文结构索引和证据地图。
-2. 再分阶段抽取事实、方法、实验和局限性。
-3. 最后统一写成报告，并做一次 review/revise。
+因此默认流程改成：
 
-这使它更像一个“论文阅读工作流”，而不是一个单轮问答 prompt。
+1. `analyze`：一次性读论文，产出高信号 `evidence_pack.md` 和完整 `extraction.json`
+2. `report`：基于证据包写报告，并对关键结论回看 PDF
+3. `review`：做一次 critic / revise，直接修订最终报告
 
 ## 设计原则
 
 - 忠于原文优先，缺失就明确写“不确定”
-- 方法解释优先，尤其强调 system / model pipeline、训练、推理和部署链路
-- 实验是证据，不是全文主体
-- 关键定量结果转成可编辑 Markdown 表格
-- 重要专有名词和缩写在首次出现时解释清楚
-- 最终报告应当是自然中文，不要被机械的“作者明确表述”前缀破坏可读性
+- 尽量把“理解”集中在一次完整阅读里完成，而不是跨多个窄阶段反复压缩
+- 中间产物只保留真正能服务下游写作的“证据态”，避免重复摘要
+- `Main Technology / 主要技术` 必须是最深的部分之一
+- 实验是支撑方法判断的证据，不是全文主体
+- 关键数值转成可编辑 Markdown 表格
+- 最终报告默认用自然中文，不保留机械化证据标签
 
-## 7-Stage 工作流
+## 默认工作流：`compact`
 
 | Stage | Key | 主要目标 | 主要输出 |
 |---|---|---|---|
-| 1 | `parse` | 解析 PDF 结构，建立章节、图表和证据索引 | `workspace/intermediate/parsed_notes.md` |
-| 2 | `claims` | 抽取动机、问题设定、贡献等核心事实 | `workspace/intermediate/extraction.json` |
-| 3 | `method` | 深挖主要技术，重建端到端 pipeline，解释关键术语 | `workspace/intermediate/method_notes.md` + `workspace/intermediate/extraction.json` |
-| 4 | `experiments` | 抽取数据集、指标、主结果、消融和关键表格 | `workspace/intermediate/experiment_notes.md` + `workspace/intermediate/extraction.json` |
-| 5 | `compare` | 补全比较、局限性与未来工作 | `workspace/intermediate/extraction.json` |
-| 6 | `report` | 基于模板和结构化抽取生成完整报告 | `workspace/output/final_report.md` |
-| 7 | `review` | 审查幻觉、越界推断、图表引用和表达质量，再直接修订报告 | `workspace/intermediate/review_notes.md` + `workspace/output/final_report.md` |
+| 1 | `analyze` | 一次性完成论文理解，建立证据包和结构化抽取 | `workspace/intermediate/evidence_pack.md` + `workspace/intermediate/extraction.json` |
+| 2 | `report` | 基于证据包和 PDF 生成最终报告 | `workspace/output/final_report.md` |
+| 3 | `review` | 审校报告并直接修订 | `workspace/intermediate/review_notes.md` + `workspace/output/final_report.md` |
 
-### Stage 1: `parse`
-
-读取 `prompts/01_parse_and_index.md`，目标是：
-
-- 识别论文题目、作者、版本或 venue/year
-- 重建章节结构
-- 列出图表及其原始编号
-- 标出动机、方法、实验、相关工作、局限性可能位于哪些章节
-
-这一阶段不追求成文质量，重点是给后续阶段提供“证据索引”。
-
-### Stage 2: `claims`
-
-读取 `prompts/02_extract_core_claims.md`，把论文的核心事实回填到 `workspace/intermediate/extraction.json`：
-
-- `basic_info`
-- `motivation`
-- `problem_setting`
-- `contributions`
-
-这一阶段仍然偏事实抽取，不提前写成漂亮 prose。
-
-### Stage 3: `method`
-
-读取 `prompts/03_extract_main_technology.md`。这是整条 pipeline 中最重要的一步。
-
-要求不仅是“讲方法”，而是：
-
-- 说清输入 / 输出
-- 把完整 pipeline 按步骤拆开
-- 解释核心模块的输入、输出、作用和连接关系
-- 说明训练目标、推理流程和部署闭环
-- 解释关键专有名词
-- 判断真正的新意和最可能的性能来源
-
-输出会写入：
-
-- `workspace/intermediate/method_notes.md`
-- `workspace/intermediate/extraction.json` 的 `main_technology` 段
-
-### Stage 4: `experiments`
-
-读取 `prompts/04_extract_experiments.md`，重点抽：
-
-- 数据集 / benchmark
-- 指标
-- 主结果
-- 消融
-- 泛化或定性结果
-- 效率 / 部署证据（如果论文有）
-
-关键数值会转成 Markdown 表格，便于后续直接引用。
-
-### Stage 5: `compare`
-
-读取 `prompts/05_compare_and_limitations.md`，补全：
-
-- `comparison`
-- `limitations`
-- `future_work`
-
-这里强调的是“谨慎比较”。  
-默认只在论文自身 `related work` 和实验比较提供足够证据时才做结论，不把它扩展成完整文献综述。
-
-### Stage 6: `report`
+### `analyze`
 
 读取：
 
-- `prompts/06_write_report.md`
-- `templates/report_template.md`
+- `prompts/compact/01_analyze_paper.md`
+- `templates/evidence_pack_template.md`
 - `templates/extraction_template.json`
+
+这一阶段是主理解阶段。要求一次性把以下内容连起来：
+
+- 论文结构和关键信息位置
+- 动机、问题设定、贡献
+- 方法 pipeline、模块、训练、推理、部署
+- 实验设置、主结果、消融、定性证据
+- 比较、局限性、未来工作
+- 所有重要不确定点
+
+输出不是“漂亮摘要”，而是后续写作可直接依赖的 `evidence_pack.md`。
+
+### `report`
+
+读取：
+
+- `prompts/compact/02_write_report.md`
+- `workspace/intermediate/evidence_pack.md`
+- `workspace/intermediate/extraction.json`
+- `templates/report_template.md`
 - `configs/report_schema.md`
 - `configs/style_guide.md`
 
-把前面各阶段积累的结构化信息统一写成：
+这一步把证据包改写成自然、严谨、技术细节充分的最终报告。`extraction.json` 只作为结构索引，不应反客为主地支配成文语气。
 
-- `workspace/output/final_report.md`
-
-这一阶段会显式重写中间抽取结果，尽量避免把中间标签机械搬运到最终报告里。
-
-### Stage 7: `review`
+### `review`
 
 读取：
 
-- `prompts/07_review_and_revise.md`
+- `prompts/compact/03_review_and_revise.md`
+- `workspace/intermediate/evidence_pack.md`
+- `workspace/intermediate/extraction.json`
+- `workspace/output/final_report.md`
 - `configs/quality_checklist.md`
 - `configs/quality_rubric.md`
 
-对最终报告做一轮 critic / self-revise，重点检查：
+重点检查：
 
 - 是否忠于论文
-- 方法解释是否具体
-- 实验证据是否真的出现
-- 图表编号是否可靠
-- 是否有幻觉或越界推断
-- 局限性是否区分作者声明与谨慎推断
+- 方法解释是否具体且完整
+- 实验结论是否真的有表格/图支撑
+- 是否有幻觉、越界推断或错误图表编号
+- 最终报告是否仍然残留机械标签
 
-输出：
+## 兼容工作流：`legacy`
 
-- `workspace/intermediate/review_notes.md`
-- 修订后的 `workspace/output/final_report.md`
+如果你仍然想使用最初的细粒度 7-stage 方案，可以显式指定：
+
+```bash
+python3 scripts/run_pipeline.py \
+  --workflow legacy \
+  --pdf workspace/input/Q-vla.pdf \
+  --full-auto
+```
+
+`legacy` 保留原有阶段：
+
+- `parse`
+- `claims`
+- `method`
+- `experiments`
+- `compare`
+- `report`
+- `review`
+
+这个模式更适合调试单个局部环节，但默认不再推荐作为主路径。
 
 ## 仓库结构
 
@@ -154,6 +122,10 @@
 │   ├── report_schema.md
 │   └── style_guide.md
 ├── prompts/
+│   ├── compact/
+│   │   ├── 01_analyze_paper.md
+│   │   ├── 02_write_report.md
+│   │   └── 03_review_and_revise.md
 │   ├── 01_parse_and_index.md
 │   ├── 02_extract_core_claims.md
 │   ├── 03_extract_main_technology.md
@@ -164,6 +136,7 @@
 ├── scripts/
 │   └── run_pipeline.py
 ├── templates/
+│   ├── evidence_pack_template.md
 │   ├── extraction_template.json
 │   └── report_template.md
 └── workspace/
@@ -173,14 +146,15 @@
     └── output/
 ```
 
-各目录职责可以这样理解：
+各目录职责：
 
-- `AGENT.md`: 全局规则，定义智能体目标、语言和技术深度要求
-- `prompts/`: 每个 stage 的局部任务说明
-- `configs/`: 对最终报告的结构、风格和质检要求
-- `templates/`: 最终报告和结构化抽取的骨架
-- `scripts/run_pipeline.py`: 7-stage orchestrator
-- `workspace/`: 本地运行目录，不是长期版本化内容
+- `AGENT.md`：全局规则
+- `prompts/compact/`：默认的少阶段工作流 prompt
+- `prompts/*.md`：原始 `legacy` 工作流 prompt
+- `configs/`：报告结构、风格和质检要求
+- `templates/`：结构化中间产物和最终报告骨架
+- `scripts/run_pipeline.py`：workflow orchestrator
+- `workspace/`：输入、输出、中间产物和运行日志
 
 ## 推荐运行方式
 
@@ -190,9 +164,9 @@
 
 - `workspace/input/<paper>.pdf`
 
-建议一次只放一篇，避免 agent 读错文件。
+建议一次只放一篇。
 
-### 2. 直接运行完整 7-stage pipeline
+### 2. 运行默认 `compact` 工作流
 
 ```bash
 python3 scripts/run_pipeline.py \
@@ -200,19 +174,32 @@ python3 scripts/run_pipeline.py \
   --full-auto
 ```
 
-### 3. 只跑部分阶段
+### 3. 只跑默认工作流的部分阶段
 
-例如从 `claims` 跑到 `review`：
+例如只从 `report` 跑到 `review`：
 
 ```bash
 python3 scripts/run_pipeline.py \
   --pdf workspace/input/Q-vla.pdf \
-  --from-stage claims \
+  --from-stage report \
   --to-stage review \
   --full-auto
 ```
 
-### 4. 只生成本次 prompt，不真正调用 Codex
+前提是 `workspace/intermediate/evidence_pack.md` 和 `workspace/intermediate/extraction.json` 已存在。
+
+### 4. 切回 `legacy` 工作流
+
+```bash
+python3 scripts/run_pipeline.py \
+  --workflow legacy \
+  --pdf workspace/input/Q-vla.pdf \
+  --from-stage method \
+  --to-stage review \
+  --full-auto
+```
+
+### 5. 只生成 prompt，不真正调用 Codex
 
 ```bash
 python3 scripts/run_pipeline.py \
@@ -222,23 +209,27 @@ python3 scripts/run_pipeline.py \
 
 ## `run_pipeline.py` 做了什么
 
-这个脚本不是“大而全”的 workflow engine，而是一个最小可用 orchestrator。它会：
+这个脚本是一个最小可用 orchestrator。它会：
 
 1. 检查仓库布局和输入 PDF。
-2. 根据 `--from-stage` / `--to-stage` 选择阶段区间。
-3. 在需要时自动初始化 `workspace/intermediate/extraction.json`。
+2. 根据 `--workflow`、`--from-stage`、`--to-stage` 选择阶段区间。
+3. 在需要时初始化 `workspace/intermediate/extraction.json`。
 4. 为每个 stage 单独构造 prompt，并启动一次 `codex exec`。
 5. 验证阶段输出是否存在、是否为空、JSON 是否合法。
 6. 记录 manifest、stage prompt、stdout log 和最后一条 agent 回复。
-7. 从每个 stage 的 stdout log 里解析 `tokens used`，汇总整条 pipeline 的 token 使用量。
+7. 从各阶段日志里解析 `tokens used` 并汇总。
 
-这意味着整条 pipeline 不是“一段长对话”，而是“7 次独立的 Codex 调用，通过文件状态接力”。
+无论是 `compact` 还是 `legacy`，本质上都还是“多次独立调用 + 文件接力”。区别在于：
+
+- `compact` 只让模型在少数高价值边界上切换上下文
+- `legacy` 会把理解过程拆得更细
 
 ## 常用参数
 
 | 参数 | 作用 |
 |---|---|
 | `--pdf` | 输入 PDF 路径 |
+| `--workflow` | 选择 `compact` 或 `legacy` |
 | `--from-stage` / `--to-stage` | 指定起止阶段 |
 | `--model` | 透传给 `codex exec` 的模型名 |
 | `--profile` | 透传给 `codex exec` 的 profile |
@@ -252,38 +243,37 @@ python3 scripts/run_pipeline.py \
 
 ## 运行产物
 
-### 中间产物
+默认 `compact` 模式的主要产物：
 
-- `workspace/intermediate/parsed_notes.md`
+- `workspace/intermediate/evidence_pack.md`
 - `workspace/intermediate/extraction.json`
-- `workspace/intermediate/method_notes.md`
-- `workspace/intermediate/experiment_notes.md`
 - `workspace/intermediate/review_notes.md`
-
-### 最终产物
-
 - `workspace/output/final_report.md`
 
-### 每次运行的日志目录
+`legacy` 模式还会额外使用：
+
+- `workspace/intermediate/parsed_notes.md`
+- `workspace/intermediate/method_notes.md`
+- `workspace/intermediate/experiment_notes.md`
+
+每次运行都会生成：
 
 - `workspace/logs/run-YYYYMMDD-HHMMSS/`
 
-典型内容包括：
+其中通常包含：
 
-- `manifest.json`: 本次运行的参数快照
-- `01_parse.prompt.txt`: 该阶段真正送给 Codex 的 prompt
-- `01_parse.stdout.log`: 该阶段的完整 CLI 输出
-- `01_parse.last_message.txt`: 阶段结束时 agent 的收尾回复
-- `token_usage.json`: 各阶段及总 token 统计
+- `manifest.json`
+- `<stage>.prompt.txt`
+- `<stage>.stdout.log`
+- `<stage>.last_message.txt`
+- `token_usage.json`
 
-## 最终报告应该长什么样
-
-一份合格的 `final_report.md` 至少应满足：
+## 一份好报告至少应满足
 
 - 顶层结构完整，覆盖基本信息、动机、问题设定、贡献、技术、实验、比较、局限性、未来工作、总结
-- `Main Technology / 主要技术` 是全文最详细的部分之一
-- 可以把方法的 pipeline 按步骤复述出来，而不是只复述 abstract
-- 关键术语、缩写和 paper-specific object 在首次出现时有简洁解释
+- `主要技术` 是全文最详细的部分之一
+- 方法 pipeline 能按步骤复述，而不是只复述 abstract
+- 关键术语、缩写和 paper-specific object 首次出现时被解释
 - 至少包含一个可编辑 Markdown 结果表
 - 引用原始 Figure / Table 编号，但不重绘图片
 - 区分事实、证据和谨慎推断
@@ -291,42 +281,15 @@ python3 scripts/run_pipeline.py \
 
 ## 建议的使用习惯
 
-- 优先按 stage 跑，不要一开始就追求“一条指令跑到底”
-- `method` 阶段完成后先人工抽查一遍，再决定是否继续
-- 对机器人、VLA、LLM 论文，优先看方法 pipeline 是否真正讲清
-- 实验部分优先保留主结果、关键消融和部署证据，不要机械抄全表
-- `review` 阶段不要省，它对减少幻觉和改善成文质量很有用
-
-## 什么适合进版本库，什么不适合
-
-当前仓库默认只版本化“流程定义”本身：
-
-- 适合上传：`AGENT.md`、`prompts/`、`configs/`、`templates/`、`scripts/`、`README.md`
-- 不适合上传：输入 PDF、运行日志、中间产物、最终报告
-
-因此 `.gitignore` 默认忽略：
-
-- `workspace/input/*`
-- `workspace/intermediate/*`
-- `workspace/output/*`
-- `workspace/logs/*`
-- Python `__pycache__` 和本地环境目录
-
-`workspace/` 目录里只保留空目录占位文件，方便新环境直接运行。
+- 默认优先跑 `compact`
+- 如果怀疑方法部分不够深，优先回看 `evidence_pack.md`，而不是继续堆更多中间 notes
+- 对机器人、VLA、LLM 论文，先检查方法 pipeline、训练、推理、部署是否真正讲清
+- `review` 阶段不要省，它对降低幻觉和清理机械表达仍然很有价值
+- 只有在你明确想调试某一个子问题时，再切到 `legacy`
 
 ## 当前版本的边界
 
-这是一个工程上可用、但仍然偏轻量的 workflow 定义仓库，而不是重型调度系统。它当前的边界包括：
-
 - 依赖外部 `codex` CLI 和登录状态
-- 没有更细粒度的自动质检脚本，只做了阶段级基本校验
-- 结构化抽取仍然以模板和 prompt 约束为主，没有更强的 schema validator
-- 对跨论文批处理、检索增强和多篇综述写作没有专门设计
-
-## 后续可以继续增强的方向
-
-- 给 `final_report.md` 增加更严格的结构检查
-- 增加对 `extraction.json` 更细的字段级校验
-- 统一历史命名，去掉 `method_notes.md` / `methods_notes.md` 这种重复痕迹
-- 增加样例 run 和回归测试数据
-- 在更强模型下重新评估阶段拆分粒度，减少不必要的信息搬运
+- 没有更细粒度的自动质检脚本，只做了阶段级校验
+- `extraction.json` 的校验仍然是顶层 schema 级别，不是字段级 validator
+- 还没有专门为跨论文批处理、检索增强和综述写作设计

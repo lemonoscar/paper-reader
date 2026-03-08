@@ -37,7 +37,68 @@ EXTRACTION_TEMPLATE = REPO_ROOT / "templates" / "extraction_template.json"
 EXTRACTION_FILE = INTERMEDIATE_DIR / "extraction.json"
 
 
-STAGES: tuple[Stage, ...] = (
+COMPACT_STAGES: tuple[Stage, ...] = (
+    Stage(
+        key="analyze",
+        number=1,
+        prompt_file="prompts/compact/01_analyze_paper.md",
+        outputs=(
+            "workspace/intermediate/evidence_pack.md",
+            "workspace/intermediate/extraction.json",
+        ),
+        context_files=(
+            "templates/evidence_pack_template.md",
+            "templates/extraction_template.json",
+        ),
+        description="Read the paper once, build a durable evidence pack, and fully populate the extraction JSON.",
+        file_instructions=(
+            "Write a comprehensive evidence pack to `workspace/intermediate/evidence_pack.md`.",
+            "Also update `workspace/intermediate/extraction.json` in place.",
+            "Keep `workspace/intermediate/extraction.json` valid JSON after your edits.",
+        ),
+    ),
+    Stage(
+        key="report",
+        number=2,
+        prompt_file="prompts/compact/02_write_report.md",
+        outputs=("workspace/output/final_report.md",),
+        context_files=(
+            "workspace/intermediate/evidence_pack.md",
+            "workspace/intermediate/extraction.json",
+            "templates/report_template.md",
+            "configs/report_schema.md",
+            "configs/style_guide.md",
+        ),
+        description="Write the final report from the evidence pack while verifying important claims against the PDF.",
+        file_instructions=(
+            "Write the report to `workspace/output/final_report.md`.",
+        ),
+    ),
+    Stage(
+        key="review",
+        number=3,
+        prompt_file="prompts/compact/03_review_and_revise.md",
+        outputs=(
+            "workspace/intermediate/review_notes.md",
+            "workspace/output/final_report.md",
+        ),
+        context_files=(
+            "workspace/intermediate/evidence_pack.md",
+            "workspace/intermediate/extraction.json",
+            "workspace/output/final_report.md",
+            "configs/quality_checklist.md",
+            "configs/quality_rubric.md",
+        ),
+        description="Review the report, log issues, and revise the final output.",
+        file_instructions=(
+            "Write review findings to `workspace/intermediate/review_notes.md`.",
+            "Revise `workspace/output/final_report.md` directly after the review.",
+        ),
+    ),
+)
+
+
+LEGACY_STAGES: tuple[Stage, ...] = (
     Stage(
         key="parse",
         number=1,
@@ -168,7 +229,11 @@ STAGES: tuple[Stage, ...] = (
 )
 
 
-STAGE_BY_KEY = {stage.key: stage for stage in STAGES}
+WORKFLOWS: dict[str, tuple[Stage, ...]] = {
+    "compact": COMPACT_STAGES,
+    "legacy": LEGACY_STAGES,
+}
+DEFAULT_WORKFLOW = "compact"
 
 
 class PipelineError(RuntimeError):
@@ -180,7 +245,7 @@ TOKEN_USED_PATTERN = re.compile(r"tokens used\s*\n\s*([0-9][0-9,]*)", re.IGNOREC
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Orchestrate the seven-stage paper report pipeline with codex exec."
+        description="Orchestrate the paper report pipeline with codex exec."
     )
     parser.add_argument(
         "--pdf",
@@ -188,16 +253,18 @@ def parse_args() -> argparse.Namespace:
         help="Path to the input paper PDF. Relative paths are resolved from the repo root.",
     )
     parser.add_argument(
+        "--workflow",
+        choices=WORKFLOWS.keys(),
+        default=DEFAULT_WORKFLOW,
+        help="Workflow to run. `compact` is optimized for high-context models; `legacy` preserves the original seven-stage split.",
+    )
+    parser.add_argument(
         "--from-stage",
-        choices=STAGE_BY_KEY.keys(),
-        default=STAGES[0].key,
-        help="Stage to start from.",
+        help="Stage to start from. Defaults to the first stage of the selected workflow.",
     )
     parser.add_argument(
         "--to-stage",
-        choices=STAGE_BY_KEY.keys(),
-        default=STAGES[-1].key,
-        help="Stage to stop at.",
+        help="Stage to stop at. Defaults to the last stage of the selected workflow.",
     )
     parser.add_argument(
         "--codex-bin",
@@ -290,15 +357,23 @@ def relative_to_root(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
 
 
-def stage_slice(from_stage: str, to_stage: str) -> tuple[Stage, ...]:
-    start = next(i for i, stage in enumerate(STAGES) if stage.key == from_stage)
-    end = next(i for i, stage in enumerate(STAGES) if stage.key == to_stage)
+def stage_slice(stages: tuple[Stage, ...], from_stage: str, to_stage: str) -> tuple[Stage, ...]:
+    stage_by_key = {stage.key: stage for stage in stages}
+    if from_stage not in stage_by_key:
+        available = ", ".join(stage.key for stage in stages)
+        raise PipelineError(f"Unknown stage `{from_stage}` for this workflow. Available stages: {available}")
+    if to_stage not in stage_by_key:
+        available = ", ".join(stage.key for stage in stages)
+        raise PipelineError(f"Unknown stage `{to_stage}` for this workflow. Available stages: {available}")
+
+    start = next(i for i, stage in enumerate(stages) if stage.key == from_stage)
+    end = next(i for i, stage in enumerate(stages) if stage.key == to_stage)
     if start > end:
         raise PipelineError("--from-stage must come before or equal to --to-stage.")
-    return STAGES[start : end + 1]
+    return stages[start : end + 1]
 
 
-def build_stage_prompt(stage: Stage, pdf_path: Path) -> str:
+def build_stage_prompt(stage: Stage, total_stages: int, pdf_path: Path) -> str:
     must_read = [
         "AGENT.md",
         stage.prompt_file,
@@ -313,7 +388,7 @@ def build_stage_prompt(stage: Stage, pdf_path: Path) -> str:
 
     return textwrap.dedent(
         f"""\
-        You are executing stage {stage.number} of {len(STAGES)} for the paper report pipeline.
+        You are executing stage {stage.number} of {total_stages} for the paper report pipeline.
 
         Stage key:
         - `{stage.key}`
@@ -378,6 +453,7 @@ def write_run_manifest(run_dir: Path, args: argparse.Namespace, pdf_path: Path, 
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "repo_root": str(REPO_ROOT),
         "pdf": relative_to_root(pdf_path),
+        "workflow": args.workflow,
         "stages": [stage.key for stage in stages],
         "codex_bin": args.codex_bin,
         "model": args.model,
@@ -526,18 +602,24 @@ def validate_stage_context(stage: Stage, pdf_path: Path) -> None:
             raise PipelineError(f"Missing required stage input: {required_file}")
 
 
-def print_stage_header(stage: Stage, run_dir: Path) -> None:
+def print_stage_header(stage: Stage, total_stages: int, run_dir: Path) -> None:
     print()
-    print(f"[stage {stage.number}/{len(STAGES)}] {stage.key}")
+    print(f"[stage {stage.number}/{total_stages}] {stage.key}")
     print(f"run dir: {relative_to_root(run_dir)}")
     print(f"prompt: {stage.prompt_file}")
     print(f"outputs: {', '.join(stage.outputs)}")
 
 
-def run_stage(stage: Stage, args: argparse.Namespace, pdf_path: Path, run_dir: Path) -> int | None:
-    print_stage_header(stage, run_dir)
+def run_stage(
+    stage: Stage,
+    total_stages: int,
+    args: argparse.Namespace,
+    pdf_path: Path,
+    run_dir: Path,
+) -> int | None:
+    print_stage_header(stage, total_stages, run_dir)
     validate_stage_context(stage, pdf_path)
-    prompt_text = build_stage_prompt(stage, pdf_path)
+    prompt_text = build_stage_prompt(stage, total_stages, pdf_path)
 
     prompt_path = run_dir / f"{stage.number:02d}_{stage.key}.prompt.txt"
     last_message_path = run_dir / f"{stage.number:02d}_{stage.key}.last_message.txt"
@@ -582,8 +664,14 @@ def main() -> int:
             "Input PDF must be inside the repository so codex exec can access it under the repo root."
         )
 
-    selected_stages = stage_slice(args.from_stage, args.to_stage)
-    needs_extraction = any(stage.key in {"claims", "method", "experiments", "compare"} for stage in selected_stages)
+    workflow_stages = WORKFLOWS[args.workflow]
+    from_stage = args.from_stage or workflow_stages[0].key
+    to_stage = args.to_stage or workflow_stages[-1].key
+
+    selected_stages = stage_slice(workflow_stages, from_stage, to_stage)
+    needs_extraction = any(
+        (REPO_ROOT / output).resolve() == EXTRACTION_FILE for stage in selected_stages for output in stage.outputs
+    )
     if needs_extraction or args.force_init_extraction:
         ensure_extraction_file(args.force_init_extraction)
 
@@ -593,12 +681,13 @@ def main() -> int:
 
     print(f"repo root: {REPO_ROOT}")
     print(f"input pdf: {relative_to_root(pdf_path) if pdf_path.is_relative_to(REPO_ROOT) else pdf_path}")
+    print(f"workflow: {args.workflow}")
     print(f"run logs: {relative_to_root(run_dir)}")
     print(f"stages: {', '.join(stage.key for stage in selected_stages)}")
 
     stage_tokens: list[tuple[Stage, int | None]] = []
     for stage in selected_stages:
-        tokens_used = run_stage(stage, args, pdf_path, run_dir)
+        tokens_used = run_stage(stage, len(workflow_stages), args, pdf_path, run_dir)
         stage_tokens.append((stage, tokens_used))
 
     summary_path = write_token_summary(run_dir, stage_tokens)
