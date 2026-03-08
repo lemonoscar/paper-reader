@@ -35,6 +35,7 @@ LOGS_DIR = WORKSPACE_DIR / "logs"
 AGENT_FILE = REPO_ROOT / "AGENT.md"
 EXTRACTION_TEMPLATE = REPO_ROOT / "templates" / "extraction_template.json"
 EXTRACTION_FILE = INTERMEDIATE_DIR / "extraction.json"
+WORKSPACE_PRESERVED_FILES = {".gitkeep"}
 
 
 COMPACT_STAGES: tuple[Stage, ...] = (
@@ -260,7 +261,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--from-stage",
-        help="Stage to start from. Defaults to the first stage of the selected workflow.",
+        help="Stage to start from. Because `workspace/intermediate` is reset on each run, this must be the first stage of the selected workflow.",
     )
     parser.add_argument(
         "--to-stage",
@@ -353,6 +354,21 @@ def ensure_extraction_file(force_reset: bool) -> None:
         shutil.copyfile(EXTRACTION_TEMPLATE, EXTRACTION_FILE)
 
 
+def reset_intermediate_dir() -> int:
+    removed_entries = 0
+    for entry in INTERMEDIATE_DIR.iterdir():
+        if entry.name in WORKSPACE_PRESERVED_FILES:
+            continue
+
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        removed_entries += 1
+
+    return removed_entries
+
+
 def relative_to_root(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
 
@@ -371,6 +387,16 @@ def stage_slice(stages: tuple[Stage, ...], from_stage: str, to_stage: str) -> tu
     if start > end:
         raise PipelineError("--from-stage must come before or equal to --to-stage.")
     return stages[start : end + 1]
+
+
+def validate_entry_stage(stages: tuple[Stage, ...], from_stage: str) -> None:
+    first_stage = stages[0].key
+    if from_stage != first_stage:
+        raise PipelineError(
+            f"`--from-stage {from_stage}` is not supported because "
+            "`workspace/intermediate` is cleared at the start of every run. "
+            f"Start from `{first_stage}` instead."
+        )
 
 
 def build_stage_prompt(stage: Stage, total_stages: int, pdf_path: Path) -> str:
@@ -448,12 +474,20 @@ def build_codex_command(args: argparse.Namespace, last_message_path: Path) -> li
     return command
 
 
-def write_run_manifest(run_dir: Path, args: argparse.Namespace, pdf_path: Path, stages: Iterable[Stage]) -> None:
+def write_run_manifest(
+    run_dir: Path,
+    args: argparse.Namespace,
+    pdf_path: Path,
+    stages: Iterable[Stage],
+    intermediate_entries_cleared: int,
+) -> None:
     manifest = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "repo_root": str(REPO_ROOT),
         "pdf": relative_to_root(pdf_path),
         "workflow": args.workflow,
+        "intermediate_reset_on_startup": True,
+        "intermediate_entries_cleared": intermediate_entries_cleared,
         "stages": [stage.key for stage in stages],
         "codex_bin": args.codex_bin,
         "model": args.model,
@@ -669,6 +703,8 @@ def main() -> int:
     to_stage = args.to_stage or workflow_stages[-1].key
 
     selected_stages = stage_slice(workflow_stages, from_stage, to_stage)
+    validate_entry_stage(workflow_stages, from_stage)
+    cleared_entries = reset_intermediate_dir()
     needs_extraction = any(
         (REPO_ROOT / output).resolve() == EXTRACTION_FILE for stage in selected_stages for output in stage.outputs
     )
@@ -677,11 +713,12 @@ def main() -> int:
 
     run_dir = LOGS_DIR / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=False)
-    write_run_manifest(run_dir, args, pdf_path, selected_stages)
+    write_run_manifest(run_dir, args, pdf_path, selected_stages, cleared_entries)
 
     print(f"repo root: {REPO_ROOT}")
     print(f"input pdf: {relative_to_root(pdf_path) if pdf_path.is_relative_to(REPO_ROOT) else pdf_path}")
     print(f"workflow: {args.workflow}")
+    print(f"intermediate reset: cleared {cleared_entries} entr{'y' if cleared_entries == 1 else 'ies'}")
     print(f"run logs: {relative_to_root(run_dir)}")
     print(f"stages: {', '.join(stage.key for stage in selected_stages)}")
 

@@ -4,6 +4,8 @@
 
 当前默认工作流是面向高上下文模型优化过的 `compact` 模式：不再把理解过程拆成过多独立阶段，而是先做一次完整分析，再写报告，最后审校修订。原始 7-stage 方案仍然保留为 `legacy`，用于对比或兼容旧习惯。
 
+从 `v2.1` 开始，`run_pipeline.py` 会在每次启动时先清空 `workspace/intermediate/` 中上一次运行留下的中间产物，只保留目录占位文件。这是默认行为，目的是避免旧的中间状态污染新一轮论文分析。
+
 ## 为什么默认改成 `compact`
 
 这个仓库最初把论文阅读拆成 `parse -> claims -> method -> experiments -> compare -> report -> review` 七次独立调用。这个思路对弱模型有帮助，但对像 Codex CLI 这种本身上下文能力较强的模型，常见副作用是：
@@ -174,19 +176,21 @@ python3 scripts/run_pipeline.py \
   --full-auto
 ```
 
-### 3. 只跑默认工作流的部分阶段
+### 3. 只跑默认工作流的前半段
 
-例如只从 `report` 跑到 `review`：
+例如只跑到 `report`，不做最终审校：
 
 ```bash
 python3 scripts/run_pipeline.py \
   --pdf workspace/input/Q-vla.pdf \
-  --from-stage report \
-  --to-stage review \
+  --to-stage report \
   --full-auto
 ```
 
-前提是 `workspace/intermediate/evidence_pack.md` 和 `workspace/intermediate/extraction.json` 已存在。
+由于每次运行都会清空 `workspace/intermediate/`，当前内置 workflow 必须从首阶段启动：
+
+- `compact` 必须从 `analyze` 开始
+- `legacy` 必须从 `parse` 开始
 
 ### 4. 切回 `legacy` 工作流
 
@@ -194,8 +198,7 @@ python3 scripts/run_pipeline.py \
 python3 scripts/run_pipeline.py \
   --workflow legacy \
   --pdf workspace/input/Q-vla.pdf \
-  --from-stage method \
-  --to-stage review \
+  --to-stage method \
   --full-auto
 ```
 
@@ -213,11 +216,12 @@ python3 scripts/run_pipeline.py \
 
 1. 检查仓库布局和输入 PDF。
 2. 根据 `--workflow`、`--from-stage`、`--to-stage` 选择阶段区间。
-3. 在需要时初始化 `workspace/intermediate/extraction.json`。
-4. 为每个 stage 单独构造 prompt，并启动一次 `codex exec`。
-5. 验证阶段输出是否存在、是否为空、JSON 是否合法。
-6. 记录 manifest、stage prompt、stdout log 和最后一条 agent 回复。
-7. 从各阶段日志里解析 `tokens used` 并汇总。
+3. 在运行开始时清空 `workspace/intermediate/` 中上一次的中间产物。
+4. 在需要时初始化 `workspace/intermediate/extraction.json`。
+5. 为每个 stage 单独构造 prompt，并启动一次 `codex exec`。
+6. 验证阶段输出是否存在、是否为空、JSON 是否合法。
+7. 记录 manifest、stage prompt、stdout log 和最后一条 agent 回复。
+8. 从各阶段日志里解析 `tokens used` 并汇总。
 
 无论是 `compact` 还是 `legacy`，本质上都还是“多次独立调用 + 文件接力”。区别在于：
 
@@ -230,7 +234,7 @@ python3 scripts/run_pipeline.py \
 |---|---|
 | `--pdf` | 输入 PDF 路径 |
 | `--workflow` | 选择 `compact` 或 `legacy` |
-| `--from-stage` / `--to-stage` | 指定起止阶段 |
+| `--from-stage` / `--to-stage` | 指定起止阶段；由于每次运行会清空 `workspace/intermediate/`，当前内置 workflow 只能从首阶段开始，`--to-stage` 仍可用于提前结束 |
 | `--model` | 透传给 `codex exec` 的模型名 |
 | `--profile` | 透传给 `codex exec` 的 profile |
 | `--sandbox` | Codex sandbox 模式，默认 `workspace-write` |
@@ -260,6 +264,10 @@ python3 scripts/run_pipeline.py \
 
 - `workspace/logs/run-YYYYMMDD-HHMMSS/`
 
+同时会清空：
+
+- `workspace/intermediate/` 中除 `.gitkeep` 以外的旧文件和旧目录
+
 其中通常包含：
 
 - `manifest.json`
@@ -282,6 +290,7 @@ python3 scripts/run_pipeline.py \
 ## 建议的使用习惯
 
 - 默认优先跑 `compact`
+- 如果你想保留某次运行的中间产物，请在下次执行前自行复制出去；重新运行会先清空 `workspace/intermediate/`
 - 如果怀疑方法部分不够深，优先回看 `evidence_pack.md`，而不是继续堆更多中间 notes
 - 对机器人、VLA、LLM 论文，先检查方法 pipeline、训练、推理、部署是否真正讲清
 - `review` 阶段不要省，它对降低幻觉和清理机械表达仍然很有价值
